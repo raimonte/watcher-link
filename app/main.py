@@ -118,11 +118,35 @@ async def public_dashboard(token: str, conn=Depends(get_postgres_connect)):
         )
 
     workers = []
+    for record in worker_records:
+        workers.append(
+            Worker(
+                id=str(record["id"]),
+                name=record["name"],
+                status=record["status"],
+                last_seen_at=record["last_seen_at"],
+                hashrate_th=record["hashrate_mh"],  # TODO convert hashrate
+            )
+        )
+
+    agg_record = await conn.fetchrow(
+        """
+        SELECT
+            SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END) AS online,
+            SUM(CASE WHEN status = 'offline' THEN 1 ELSE 0 END) AS offline,
+            SUM(CASE WHEN status = 'inactive' THEN 1 ELSE 0 END) as inactive,
+            COALESCE(ROUND(SUM(hashrate_mh) / 1000.0, 3), 0.000) AS total_hashrate_th
+        FROM workers
+        WHERE user_id = $1
+        """,
+        user_id,
+    )
+
     agg = AggregatedStats(
-        online=0,
-        offline=0,
-        inactive=0,
-        total_hashrate_th="0.000",
+        online=agg_record["online"],
+        offline=agg_record["offline"],
+        inactive=agg_record["inactive"],
+        total_hashrate_th=agg_record["total_hashrate_th"],
     )
     return DashboardResponse(workers=workers, agg=agg)
 
