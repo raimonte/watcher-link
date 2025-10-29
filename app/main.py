@@ -4,11 +4,13 @@ import hashlib
 import logging
 import json
 from datetime import datetime
+from datetime import timezone
 from enum import Enum
 from typing import Any
 from typing import Optional
 from typing import Union
 from uuid import UUID
+from uuid import uuid4
 
 import asyncpg
 import redis.asyncio as aioredis
@@ -123,6 +125,9 @@ async def public_dashboard(
     conn=Depends(get_postgres_connect),
     redis=Depends(get_redis),
 ):
+    request_id = gen_request_id()
+    logger.info(f"[{request_id}] Handling dashboard for token={token[:6]}...")
+
     await rate_limit_check(redis, token)
 
     client_etag = request.headers.get("if-none-match")
@@ -130,17 +135,21 @@ async def public_dashboard(
     cached_etag = await redis.get(cache_key)
 
     if client_etag and cached_etag and client_etag == cached_etag:
+        logger.info(f"[{request_id}] ETag matched")
         return Response(status_code=304)
 
     dashboard_response: DashboardResponse = await fetch_data_by_token(conn, token)
-    dashboard_response_dict = dashboard_response.dict()
+    dashboard_response_json = dashboard_response.model_dump(mode="json")
+    logger.debug(f"[{request_id}] Fetched data for user_id={dashboard_response_json.get('user_id')}")
 
-    new_etag = make_etag(dashboard_response_dict)
+    new_etag = make_etag(dashboard_response_json)
     await redis.setex(cache_key, 60, new_etag)  # ttl 60
 
-    response = JSONResponse(content=dashboard_response_dict)
+    response = JSONResponse(content=dashboard_response_json)
     response.headers["ETag"] = new_etag
     response.headers["Cache-Control"] = "public, max-age=30"
+
+    logger.info(f"[{request_id}] Response 200 OK, ETag={new_etag[:8]}")
     return response
 
 
@@ -225,8 +234,6 @@ async def get_watcher_link_record(db_conn: asyncpg.Connection,  payload_hash: by
         SELECT * FROM watcher_links
         WHERE
             payload_hash = $1
-            AND revoked_at IS NULL
-            AND expires_at > now()
         """,
         payload_hash,
     )
@@ -280,21 +287,32 @@ async def rate_limit_check(redis, token: str, limit=30, window=60):
 
 
 def make_etag(data: dict[str, Any]) -> str:
-    deserialized_json_data = json.loads(json.dumps(data))
+    deserialized_json_data = json.loads(json.dumps(data, default=str))
     now = datetime.utcnow()
 
     for worker_data in deserialized_json_data.get("workers", []):
         ts = worker_data.get("last_seen_at")
-        if ts:
-            if isinstance(ts, str):
-                try:
-                    ts_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                except ValueError:
-                    ts_dt = None
-            else:
-                ts_dt = ts
+        if not ts:
+            continue
 
-            if ts_dt and abs((now - ts_dt).total_seconds()) < 60:
+        ts_dt = None
+
+        if isinstance(ts, str):
+            try:
+                ts_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        elif isinstance(ts, datetime):
+            ts_dt = ts
+
+        if ts_dt:
+            if ts_dt.tzinfo is None:
+                ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+
+            if abs((now - ts_dt).total_seconds()) < 60:
                 worker_data["last_seen_at"] = None
 
     json_data = json.dumps(
@@ -304,6 +322,10 @@ def make_etag(data: dict[str, Any]) -> str:
         ensure_ascii=False,
     )
     return hashlib.sha256(json_data.encode()).hexdigest()
+
+
+def gen_request_id() -> str:
+    return str(uuid4())
 
 
 class APIException(HTTPException):
