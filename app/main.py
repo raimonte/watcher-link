@@ -16,7 +16,6 @@ from fastapi import FastAPI
 from fastapi import Depends
 from fastapi import HTTPException
 from pydantic import BaseModel
-from starlette.responses import Response
 from starlette.requests import Request
 
 
@@ -52,6 +51,19 @@ app = FastAPI(
     title="Watcher link",
 )
 
+@app.on_event("startup")
+async def startup():
+    app.state.pg_pool = await asyncpg.create_pool(
+        POSTGRES_URL,
+        min_size=1,
+        max_size=10,
+    )
+
+@app.on_event("shutdown")
+async def shutdown():
+    await app.state.pg_pool.close()
+
+
 @app.get("/healthz", response_model=SuccessResponse)
 async def heathcheck(request: Request):
     return {}
@@ -83,17 +95,14 @@ class DashboardResponse(BaseModel):
     agg: AggregatedStats
 
 
-async def get_postgres_connect():
-    # TODO use connection pool
-    conn = await asyncpg.connect(POSTGRES_URL)
-    try:
+
+async def get_postgres_connect(request: Request):
+    async with request.app.state.pg_pool.acquire() as conn:
         yield conn
-    finally:
-        await conn.close()
 
 
 @app.get("/public/w/{token}/dashboard", response_model=DashboardResponse)
-async def public_dashboard(token: str, conn=Depends(get_postgres_connect)):
+async def public_dashboard(request: Request, token: str, conn=Depends(get_postgres_connect)):
     return await fetch_data_by_token(conn, token)
 
 
@@ -107,10 +116,10 @@ async def fetch_data_by_token(db_conn: asyncpg.Connection, token: str):
 
     user_id = watcher_link_record["user_id"]
 
-    workers_task = fetch_workers_by_user_id(db_conn, user_id)
-    agg_task = get_aggregate_stats(db_conn, user_id)
-
-    workers, agg = await asyncio.gather(workers_task, agg_task)
+    async with app.state.pg_pool.acquire() as conn1, app.state.pg_pool.acquire() as conn2:
+        workers_task = fetch_workers_by_user_id(conn1, user_id)
+        agg_task = get_aggregate_stats(conn2, user_id)
+        workers, agg = await asyncio.gather(workers_task, agg_task)
 
     return DashboardResponse(workers=workers, agg=agg)
 
@@ -123,11 +132,11 @@ def decode_token(token: str) -> bytes:
     try:
         raw_payload = base58.b58decode(token)
     except ValueError:
-        logger.debug("")
+        logger.debug(f"Invalid Base58 encoding for token: {token}")
         raise InvalidToken()
 
     if len(raw_payload) != 20:  # 16 bytest(payload) + 4 bytest(checksum)
-        logger.debug("")
+        logger.debug(f"Invalid token length: expected 20 bytes, got {len(raw_payload)}")
         raise InvalidToken()
 
     payload = raw_payload[:16]
@@ -135,9 +144,10 @@ def decode_token(token: str) -> bytes:
 
     checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
     if checksum_from_token != checksum:
-        logger.debug("")
+        logger.debug("Checksum mismatch")
         raise InvalidToken()
 
+    logger.debug("Token decoded successfully")
     return hashlib.sha256(payload).digest()
 
 
