@@ -1,15 +1,19 @@
-import base58
+import os
 import hashlib
 from datetime import datetime
 from enum import Enum
 
 import asyncpg
+import base58
 from fastapi import FastAPI
 from fastapi import Depends
 from fastapi import HTTPException
 from pydantic import BaseModel
 from starlette.responses import Response
 from starlette.requests import Request
+
+
+POSTGRES_URL = os.getenv("POSTGRES_URL")
 
 
 class SuccessResponse(BaseModel):
@@ -72,7 +76,7 @@ Example
 """
 
 async def get_postgres_connect():
-    conn = await asyncpg.connect("postgres://user:password@localhost:5432/dbname")
+    conn = await asyncpg.connect(POSTGRES_URL)
     try:
         yield conn
     finally:
@@ -85,8 +89,9 @@ async def public_dashboard(token: str, conn=Depends(get_postgres_connect)):
     watcher_link_record = await conn.fetchrow(
         """
         SELECT * FROM watcher_links
-        WHERE payload_hash = $1
-            AND (revoked_at IS NULL)
+        WHERE
+            payload_hash = $1
+            AND revoked_at IS NULL
             AND expires_at > now()
         """,
         payload_hash
@@ -101,8 +106,7 @@ async def public_dashboard(token: str, conn=Depends(get_postgres_connect)):
         SELECT *
         FROM workers
         WHERE user_id = $1
-        ORDER BY last_seen_at DESC",
-        user_id,
+        ORDER BY last_seen_at DESC
         """,
         user_id,
     )
@@ -125,7 +129,7 @@ async def public_dashboard(token: str, conn=Depends(get_postgres_connect)):
                 name=record["name"],
                 status=record["status"],
                 last_seen_at=record["last_seen_at"],
-                hashrate_th=record["hashrate_mh"],  # TODO convert hashrate
+                hashrate_th=str(record["hashrate_mh"]),  # TODO convert hashrate
             )
         )
 
@@ -146,7 +150,7 @@ async def public_dashboard(token: str, conn=Depends(get_postgres_connect)):
         online=agg_record["online"],
         offline=agg_record["offline"],
         inactive=agg_record["inactive"],
-        total_hashrate_th=agg_record["total_hashrate_th"],
+        total_hashrate_th=str(agg_record["total_hashrate_th"]),
     )
     return DashboardResponse(workers=workers, agg=agg)
 
