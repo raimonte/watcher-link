@@ -16,7 +16,7 @@ app = FastAPI(
     title="Watcher link",
 )
 
-@app.get("/health", response_model=SuccessResponse)
+@app.get("/healthz", response_model=SuccessResponse)
 async def heathcheck(request: Request):
     return {}
 
