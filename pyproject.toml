@@ -11,6 +11,8 @@ dependencies = [
     "uvicorn>=0.38.0",
     "yoyo-migrations>=9.0.0",
     "psycopg2-binary>=2.9.11",
+    "asyncpg>=0.30.0",
+    "base58>=2.1.1",
 ]
 
 [[project.authors]]
@@ -18,6 +20,7 @@ name = "Rail Alimov"
 
 [dependency-groups]
 dev = [
+    "faker>=37.12.0",
     "mypy>=1.14.0",
     "pytest>=8.4.2",
     "ruff>=0.14.2",

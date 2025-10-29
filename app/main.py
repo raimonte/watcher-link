@@ -1,8 +1,12 @@
+import base58
+import hashlib
 from datetime import datetime
 from enum import Enum
-from uuid import uuid4
 
+import asyncpg
 from fastapi import FastAPI
+from fastapi import Depends
+from fastapi import HTTPException
 from pydantic import BaseModel
 from starlette.responses import Response
 from starlette.requests import Request
@@ -67,31 +71,80 @@ Example
 }
 """
 
+async def get_postgres_connect():
+    conn = await asyncpg.connect("postgres://user:password@localhost:5432/dbname")
+    try:
+        yield conn
+    finally:
+        await conn.close()
+
 
 @app.get("/public/w/{token}/dashboard", response_model=DashboardResponse)
-async def public_dashboard(token: str):
-    workers = [
-        Worker(
-            id=str(uuid4()),
-            name="worker-1",
-            status="online",
-            last_seen_at=datetime.utcnow(),
-            hashrate_th="123.456",
-        ),
-        Worker(
-            id=str(uuid4()),
-            name="worker-2",
-            status="offline",
-            last_seen_at=datetime.utcnow(),
-            hashrate_th="0.001",
-        ),
-    ]
-
-    agg = AggregatedStats(
-        online=1,
-        offline=1,
-        inactive=0,
-        total_hashrate_th="123.457",
+async def public_dashboard(token: str, conn=Depends(get_postgres_connect)):
+    payload_hash = decode_token(token)
+    watcher_link_record = await conn.fetchrow(
+        """
+        SELECT * FROM watcher_links
+        WHERE payload_hash = $1
+            AND (revoked_at IS NULL)
+            AND expires_at > now()
+        """,
+        payload_hash
     )
+    if not watcher_link_record:
+        raise HTTPException(status_code=404, detail="Not found or invalid token")
 
+    user_id = watcher_link_record["user_id"]
+
+    worker_records = await conn.fetch(
+        """
+        SELECT *
+        FROM workers
+        WHERE user_id = $1
+        ORDER BY last_seen_at DESC",
+        user_id,
+        """,
+        user_id,
+    )
+    if not worker_records:
+        return DashboardResponse(
+            workers=[],
+            agg=AggregatedStats(
+                online=0,
+                offline=0,
+                inactive=0,
+                total_hashrate_th="0.000",
+            )
+        )
+
+    workers = []
+    agg = AggregatedStats(
+        online=0,
+        offline=0,
+        inactive=0,
+        total_hashrate_th="0.000",
+    )
     return DashboardResponse(workers=workers, agg=agg)
+
+
+def decode_token(token: str) -> bytes:
+    """
+    Формат: Base58Check (как в биткоине): payload(16 bytes) + checksum(4 bytes = first4(sha256(sha256(payload)))), целиком закодировано Base58.
+    """
+
+    try:
+        raw_payload = base58.b58decode(token)
+    except ValueError:
+        return None  # TODO raise exception
+
+    if len(raw_payload) != 20:  # 16 bytest(payload) + 4 bytest(checksum)
+        return None
+
+    payload = raw_payload[:16]
+    checksum_from_token = raw_payload[16:]
+
+    checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
+    if checksum_from_token != checksum:
+        return None
+
+    return hashlib.sha256(payload).digest()
