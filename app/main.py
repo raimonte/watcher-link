@@ -280,11 +280,11 @@ async def rate_limit_check(redis, token: str, limit=30, window=60):
 
 
 def make_etag(data: dict[str, Any]) -> str:
-    sanitized = json.loads(json.dumps(data))
+    deserialized_json_data = json.loads(json.dumps(data))
     now = datetime.utcnow()
 
-    for worker in sanitized.get("workers", []):
-        ts = worker.get("last_seen_at")
+    for worker_data in deserialized_json_data.get("workers", []):
+        ts = worker_data.get("last_seen_at")
         if ts:
             if isinstance(ts, str):
                 try:
@@ -295,15 +295,15 @@ def make_etag(data: dict[str, Any]) -> str:
                 ts_dt = ts
 
             if ts_dt and abs((now - ts_dt).total_seconds()) < 60:
-                worker["last_seen_at"] = None
+                worker_data["last_seen_at"] = None
 
-    canonical_json = json.dumps(
-        sanitized,
+    json_data = json.dumps(
+        deserialized_json_data,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
     )
-    return hashlib.sha256(canonical_json.encode()).hexdigest()
+    return hashlib.sha256(json_data.encode()).hexdigest()
 
 
 class APIException(HTTPException):
