@@ -2,6 +2,7 @@ import asyncio
 import os
 import hashlib
 import logging
+import json
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -10,7 +11,9 @@ from typing import Union
 from uuid import UUID
 
 import asyncpg
+import redis.asyncio as aioredis
 import base58
+from starlette.responses import JSONResponse, Response
 import structlog
 from fastapi import FastAPI
 from fastapi import Depends
@@ -41,6 +44,7 @@ logger = structlog.get_logger()
 
 
 POSTGRES_URL = os.getenv("POSTGRES_URL")
+REDIS_URL = os.getenv("REDIS_URL")
 
 
 class SuccessResponse(BaseModel):
@@ -55,13 +59,20 @@ app = FastAPI(
 async def startup():
     app.state.pg_pool = await asyncpg.create_pool(
         POSTGRES_URL,
-        min_size=1,
+        min_size=2,
         max_size=10,
+    )
+
+    app.state.redis = aioredis.from_url(
+        REDIS_URL,
+        encoding="utf-8",
+        decode_responses=True,
     )
 
 @app.on_event("shutdown")
 async def shutdown():
     await app.state.pg_pool.close()
+    await app.state.redis.close()
 
 
 @app.get("/healthz", response_model=SuccessResponse)
@@ -101,12 +112,39 @@ async def get_postgres_connect(request: Request):
         yield conn
 
 
+async def get_redis(request: Request):
+    yield request.app.state.redis
+
+
 @app.get("/public/w/{token}/dashboard", response_model=DashboardResponse)
-async def public_dashboard(request: Request, token: str, conn=Depends(get_postgres_connect)):
-    return await fetch_data_by_token(conn, token)
+async def public_dashboard(
+    request: Request,
+    token: str,
+    conn=Depends(get_postgres_connect),
+    redis=Depends(get_redis),
+):
+    await rate_limit_check(redis, token)
+
+    client_etag = request.headers.get("if-none-match")
+    cache_key = f"etag:{token}"
+    cached_etag = await redis.get(cache_key)
+
+    if client_etag and cached_etag and client_etag == cached_etag:
+        return Response(status_code=304)
+
+    dashboard_response: DashboardResponse = await fetch_data_by_token(conn, token)
+    dashboard_response_dict = dashboard_response.dict()
+
+    new_etag = make_etag(dashboard_response_dict)
+    await redis.setex(cache_key, 60, new_etag)  # ttl 60
+
+    response = JSONResponse(content=dashboard_response_dict)
+    response.headers["ETag"] = new_etag
+    response.headers["Cache-Control"] = "public, max-age=30"
+    return response
 
 
-async def fetch_data_by_token(db_conn: asyncpg.Connection, token: str):
+async def fetch_data_by_token(db_conn: asyncpg.Connection, token: str) -> DashboardResponse:
     payload_hash = decode_token(token)
 
     watcher_link_record = await get_watcher_link_record(db_conn, payload_hash)
@@ -230,6 +268,44 @@ async def aggregate_stats(db_conn: asyncpg.Connection, user_id: Union[UUID, str]
     }
 
 
+async def rate_limit_check(redis, token: str, limit=30, window=60):
+    key = f"ratelimit:{token}"
+
+    count = await redis.incr(key)
+    if count == 1:
+        await redis.expire(key, window)
+
+    if count > limit:
+        raise RatelimitExceeded()
+
+
+def make_etag(data: dict[str, Any]) -> str:
+    sanitized = json.loads(json.dumps(data))
+    now = datetime.utcnow()
+
+    for worker in sanitized.get("workers", []):
+        ts = worker.get("last_seen_at")
+        if ts:
+            if isinstance(ts, str):
+                try:
+                    ts_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except ValueError:
+                    ts_dt = None
+            else:
+                ts_dt = ts
+
+            if ts_dt and abs((now - ts_dt).total_seconds()) < 60:
+                worker["last_seen_at"] = None
+
+    canonical_json = json.dumps(
+        sanitized,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical_json.encode()).hexdigest()
+
+
 class APIException(HTTPException):
     status_code: int
     detail: str
@@ -243,3 +319,8 @@ class APIException(HTTPException):
 class InvalidToken(APIException):
     status_code = 404
     detail = "Not found or invalid token"
+
+
+class RatelimitExceeded(APIException):
+    status_code = 429
+    detail = "Rate limit exceeded"

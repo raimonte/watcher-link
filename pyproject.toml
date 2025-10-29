@@ -13,6 +13,7 @@ dependencies = [
     "psycopg2-binary>=2.9.11",
     "asyncpg>=0.30.0",
     "base58>=2.1.1",
+    "redis[asyncio]>=7.0.1",
 ]
 
 [[project.authors]]
