@@ -1,0 +1,100 @@
+[project]
+name = "watcherlink"
+version = "0.1.0"
+description = "Watcher link"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "python-dotenv>=0.21.0",
+    "pydantic-settings>=2.10.1",
+    "fastapi>=0.120.1",
+    "structlog>=25.5.0",
+    "uvicorn>=0.38.0",
+    "yoyo-migrations>=9.0.0",
+]
+
+[[project.authors]]
+name = "Rail Alimov"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.14.0",
+    "pytest>=8.4.2",
+    "ruff>=0.14.2",
+]
+
+[tool.setuptools]
+py-modules = []
+
+[tool.ruff.lint]
+select = ["B", "C", "E", "F", "W", "B9", "Q000"]
+ignore = [
+    "B008",
+    "B905",
+    "Q000",
+    "E712",
+    "B005",
+    "E501",
+    "F401",
+    "F403",
+    "E402",
+    "C408",
+    "F811",
+    "B904",
+    "C901",
+    "C416",
+    "C405",
+    "B019",
+    "F841",
+    "B018",
+    "B017",
+]
+unfixable = []
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 13
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff]
+exclude = ["migrations", "**/migrations/**", "**/*migrations*/**"]
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+allow_redefinition = false
+warn_no_return = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+follow_imports = "skip"
+exclude = [
+    "env",
+    "venv",
+    "tests",
+    ".git",
+    ".venv",
+    "__pypackages__",
+    "git-hooks",
+    "deployment",
+    "migrations",
+    ".*/migrations/.*",
+]
+
+[[tool.mypy.overrides]]
+module = "*.conftest"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "mypy-tests.*"
+ignore_errors = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+
+[tool.ruff.lint.per-file-ignores]
+"**/{migrations}/*" = ["E501"]

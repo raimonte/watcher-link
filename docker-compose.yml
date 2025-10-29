@@ -1,0 +1,12 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: watcher_link_postgres
+    environment:
+      POSTGRES_DB: watcher_link
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: dev
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5440:5432"
