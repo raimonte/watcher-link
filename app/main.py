@@ -1,7 +1,12 @@
+import asyncio
 import os
 import hashlib
 from datetime import datetime
 from enum import Enum
+from typing import Any
+from typing import Optional
+from typing import Union
+from uuid import UUID
 
 import asyncpg
 import base58
@@ -85,8 +90,11 @@ async def get_postgres_connect():
 
 @app.get("/public/w/{token}/dashboard", response_model=DashboardResponse)
 async def public_dashboard(token: str, conn=Depends(get_postgres_connect)):
-    payload_hash = decode_token(token)
-    watcher_link_record = await conn.fetchrow(
+    return await fetch_data_by_token(conn, token)
+
+
+async def get_watcher_link_record(db_conn: asyncpg.Connection,  payload_hash: bytes) -> Optional[dict[str, Any]]:
+    return await db_conn.fetchrow(
         """
         SELECT * FROM watcher_links
         WHERE
@@ -94,32 +102,15 @@ async def public_dashboard(token: str, conn=Depends(get_postgres_connect)):
             AND revoked_at IS NULL
             AND expires_at > now()
         """,
-        payload_hash
+        payload_hash,
     )
-    if not watcher_link_record:
-        raise HTTPException(status_code=404, detail="Not found or invalid token")
 
-    user_id = watcher_link_record["user_id"]
 
-    worker_records = await conn.fetch(
-        """
-        SELECT *
-        FROM workers
-        WHERE user_id = $1
-        ORDER BY last_seen_at DESC
-        """,
-        user_id,
-    )
+async def fetch_workers_by_user_id(db_conn: asyncpg.Connection, user_id: Union[UUID, str]) -> list[Worker]:
+    worker_records = await filter_workers_by_user_id(db_conn, user_id)
+
     if not worker_records:
-        return DashboardResponse(
-            workers=[],
-            agg=AggregatedStats(
-                online=0,
-                offline=0,
-                inactive=0,
-                total_hashrate_th="0.000",
-            )
-        )
+        return []
 
     workers = []
     for record in worker_records:
@@ -132,8 +123,33 @@ async def public_dashboard(token: str, conn=Depends(get_postgres_connect)):
                 hashrate_th=str(record["hashrate_mh"]),  # TODO convert hashrate
             )
         )
+    return workers
 
-    agg_record = await conn.fetchrow(
+
+async def filter_workers_by_user_id(db_conn: asyncpg.Connection, user_id: Union[UUID, str]) -> list[dict[str, Any]]:
+    return  await db_conn.fetch(
+        """
+        SELECT *
+        FROM workers
+        WHERE user_id = $1
+        ORDER BY last_seen_at DESC
+        """,
+        user_id,
+    )
+
+
+async def get_aggregate_stats(db_conn: asyncpg.Connection, user_id: Union[UUID, str]) -> AggregatedStats:
+    agg_record = await aggregate_stats(db_conn, user_id)
+    return AggregatedStats(
+        online=agg_record["online"],
+        offline=agg_record["offline"],
+        inactive=agg_record["inactive"],
+        total_hashrate_th=str(agg_record["total_hashrate_th"]),
+    )
+
+
+async def aggregate_stats(db_conn: asyncpg.Connection, user_id: Union[UUID, str]) -> dict[str, Any]:
+    record = await db_conn.fetchrow(
         """
         SELECT
             SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END) AS online,
@@ -145,13 +161,32 @@ async def public_dashboard(token: str, conn=Depends(get_postgres_connect)):
         """,
         user_id,
     )
+    if record:
+        return record
 
-    agg = AggregatedStats(
-        online=agg_record["online"],
-        offline=agg_record["offline"],
-        inactive=agg_record["inactive"],
-        total_hashrate_th=str(agg_record["total_hashrate_th"]),
-    )
+    return {
+        "online": 0,
+        "offline": 0,
+        "inactive": 0,
+        "total_hashrate_th": "0.000",
+    }
+
+
+async def fetch_data_by_token(db_conn: asyncpg.Connection, token: str):
+    payload_hash = decode_token(token)
+
+    watcher_link_record = await get_watcher_link_record(db_conn, payload_hash)
+
+    if not watcher_link_record:
+        raise HTTPException(status_code=404, detail="Not found or invalid token")
+
+    user_id = watcher_link_record["user_id"]
+
+    workers_task = fetch_workers_by_user_id(db_conn, user_id)
+    agg_task = get_aggregate_stats(db_conn, user_id)
+
+    workers, agg = await asyncio.gather(workers_task, agg_task)
+
     return DashboardResponse(workers=workers, agg=agg)
 
 
