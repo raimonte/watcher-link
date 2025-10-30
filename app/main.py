@@ -5,6 +5,7 @@ import logging
 import json
 from datetime import datetime
 from datetime import timezone
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 from typing import Optional
@@ -206,13 +207,15 @@ async def fetch_workers_by_user_id(db_conn: asyncpg.Connection, user_id: Union[U
 
     workers = []
     for record in worker_records:
+        hashrate_th = float(record["hashrate_mh"]) / 1000.0
+        hashrate_th = Decimal(round(hashrate_th, 3))
         workers.append(
             Worker(
                 id=str(record["id"]),
                 name=record["name"],
                 status=record["status"],
                 last_seen_at=record["last_seen_at"],
-                hashrate_th=str(record["hashrate_mh"]),  # TODO convert hashrate
+                hashrate_th=str(hashrate_th),
             )
         )
     return workers
@@ -234,6 +237,8 @@ async def get_watcher_link_record(db_conn: asyncpg.Connection,  payload_hash: by
         SELECT * FROM watcher_links
         WHERE
             payload_hash = $1
+            AND revoked_at IS NULL
+            AND expires_at > now()
         """,
         payload_hash,
     )
@@ -245,7 +250,7 @@ async def filter_workers_by_user_id(db_conn: asyncpg.Connection, user_id: Union[
         SELECT *
         FROM workers
         WHERE user_id = $1
-        ORDER BY last_seen_at DESC
+        ORDER BY hashrate_mh DESC, name ASC, id ASC
         """,
         user_id,
     )
